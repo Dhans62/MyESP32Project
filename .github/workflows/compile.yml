@@ -1,4 +1,4 @@
-name: Multi-Board ESP32 Build & Release
+name: Dual-Core ESP32 Build
 
 on:
   push:
@@ -7,18 +7,11 @@ on:
   workflow_dispatch:
 
 jobs:
-  build:
+  # JOB 1: KHUSUS UNTUK ESP32 KLASIK
+  build-classic:
     runs-on: ubuntu-latest
     permissions:
       contents: write
-    strategy:
-      matrix:
-        board: [
-          {name: "ESP32-Dev-Kit-V1", fqbn: "esp32:esp32:esp32"},
-          {name: "ESP32-S3", fqbn: "esp32:esp32:esp32s3"},
-          {name: "ESP32-C3", fqbn: "esp32:esp32:esp32c3"}
-        ]
-    
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
@@ -27,28 +20,61 @@ jobs:
         id: timestamp
         run: echo "time=$(date +'%Y%m%d-%H%M')" >> $GITHUB_OUTPUT
 
-      - name: Install Arduino CLI
+      - name: Setup ESP32 Core 2.0.17 (LTS)
         run: |
           curl -fsSL https://raw.githubusercontent.com/arduino/arduino-cli/master/install.sh | sh
           sudo mv bin/arduino-cli /usr/local/bin/
+          arduino-cli core update-index --additional-urls https://raw.githubusercontent.com/espressif/arduino-esp32/gh-pages/package_esp32_index.json
+          arduino-cli core install esp32:esp32@2.0.17 --additional-urls https://raw.githubusercontent.com/espressif/arduino-esp32/gh-pages/package_esp32_index.json
 
-      - name: Setup ESP32 Core 3.0.7
+      - name: Compile ESP32 Classic
         run: |
-          arduino-cli core update-index --additional-urls https://espressif.github.io/arduino-esp32/package_esp32_index.json
-          arduino-cli core install esp32:esp32@3.0.7 --additional-urls https://espressif.github.io/arduino-esp32/package_esp32_index.json
+          arduino-cli compile --fqbn esp32:esp32:esp32 --output-dir ./build/Classic .
+          mv ./build/Classic/*.bin ./build/Classic/ESP32-V1-LTS-${{ steps.timestamp.outputs.time }}.bin
 
-      - name: Compile Firmware
-        run: |
-          arduino-cli compile --fqbn ${{ matrix.board.fqbn }} --output-dir ./build/${{ matrix.board.name }} .
-          # Penamaan file dengan timestamp
-          mv ./build/${{ matrix.board.name }}/*.ino.bin ./build/${{ matrix.board.name }}/${{ matrix.board.name }}-${{ steps.timestamp.outputs.time }}.bin
-
-      - name: Upload to Release
+      - name: Upload Release Classic
         uses: softprops/action-gh-release@v2
         with:
           tag_name: latest
-          name: "Latest Firmware Build"
-          body: "Riwayat build otomatis. Gunakan file dengan timestamp terbaru."
+          files: build/Classic/*.bin
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # JOB 2: UNTUK S3 DAN C3 (FITUR MODERN)
+  build-modern:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    strategy:
+      matrix:
+        board: [
+          {name: "ESP32-S3", fqbn: "esp32:esp32:esp32s3"},
+          {name: "ESP32-C3", fqbn: "esp32:esp32:esp32c3"}
+        ]
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Get Timestamp
+        id: timestamp
+        run: echo "time=$(date +'%Y%m%d-%H%M')" >> $GITHUB_OUTPUT
+
+      - name: Setup ESP32 Core 3.0.7
+        run: |
+          curl -fsSL https://raw.githubusercontent.com/arduino/arduino-cli/master/install.sh | sh
+          sudo mv bin/arduino-cli /usr/local/bin/
+          arduino-cli core update-index --additional-urls https://espressif.github.io/arduino-esp32/package_esp32_index.json
+          arduino-cli core install esp32:esp32@3.0.7 --additional-urls https://espressif.github.io/arduino-esp32/package_esp32_index.json
+
+      - name: Compile Modern Boards
+        run: |
+          arduino-cli compile --fqbn ${{ matrix.board.fqbn }} --output-dir ./build/${{ matrix.board.name }} .
+          mv ./build/${{ matrix.board.name }}/*.bin ./build/${{ matrix.board.name }}/${{ matrix.board.name }}-v3-${{ steps.timestamp.outputs.time }}.bin
+
+      - name: Upload Release Modern
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: latest
           files: build/${{ matrix.board.name }}/*.bin
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
