@@ -7,7 +7,6 @@ on:
   workflow_dispatch:
 
 jobs:
-  # JOB 1: Untuk Board ESP32 Klasik menggunakan Core LTS (Stabil)
   build-classic:
     runs-on: ubuntu-latest
     permissions:
@@ -31,18 +30,19 @@ jobs:
         run: |
           mkdir -p ./build/Classic
           arduino-cli compile --fqbn esp32:esp32:esp32 --output-dir ./build/Classic .
-          # Mencari file .bin dan menamainya secara universal
-          find ./build/Classic -name "*.ino.bin" -exec mv {} ./build/Classic/Firmware-V1-LTS-${{ steps.timestamp.outputs.time }}.bin \;
+          # Filter: Hanya ambil file .ino.bin utama, abaikan bootloader/partitions
+          find ./build/Classic -type f -name "*.ino.bin" ! -name "*.bootloader.bin" ! -name "*.partitions.bin" -exec mv {} ./build/Classic/Firmware-V1-LTS-${{ steps.timestamp.outputs.time }}.bin \;
+          # Hapus file sisa agar tidak ikut terupload
+          rm -f ./build/Classic/*.bootloader.bin ./build/Classic/*.partitions.bin ./build/Classic/*.merged.bin
 
       - name: Upload Release Classic
         uses: softprops/action-gh-release@v2
         with:
           tag_name: latest
-          files: build/Classic/*.bin
+          files: build/Classic/Firmware-V1-LTS-*.bin
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-  # JOB 2: Untuk Board Generasi Baru (S3/C3) menggunakan Core Modern
   build-modern:
     runs-on: ubuntu-latest
     permissions:
@@ -72,8 +72,9 @@ jobs:
         run: |
           mkdir -p ./build/${{ matrix.board.name }}
           arduino-cli compile --fqbn ${{ matrix.board.fqbn }} --output-dir ./build/${{ matrix.board.name }} .
-          # Mencari file .bin dan menamainya secara universal
-          find ./build/${{ matrix.board.name }} -name "*.ino.bin" -exec mv {} ./build/${{ matrix.board.name }}/${{ matrix.board.name }}-v3-${{ steps.timestamp.outputs.time }}.bin \;
+          # Filter: Hanya ambil file .ino.bin utama
+          find ./build/${{ matrix.board.name }} -type f -name "*.ino.bin" ! -name "*.bootloader.bin" ! -name "*.partitions.bin" -exec mv {} ./build/${{ matrix.board.name }}/${{ matrix.board.name }}-v3-${{ steps.timestamp.outputs.time }}.bin \;
+          rm -f ./build/${{ matrix.board.name }}/*.bootloader.bin ./build/${{ matrix.board.name }}/*.partitions.bin ./build/${{ matrix.board.name }}/*.merged.bin
 
       - name: Upload Release Modern
         uses: softprops/action-gh-release@v2
