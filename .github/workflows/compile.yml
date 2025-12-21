@@ -1,36 +1,40 @@
-name: Build ESP32 Firmware
 
-on: [push, workflow_dispatch] # Berjalan otomatis saat update kode atau manual
+name: Multi-Board ESP32 Build
+
+on: [push, workflow_dispatch]
 
 jobs:
   build:
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        board: [
+          {name: "ESP32-Dev-Kit-V1", fqbn: "esp32:esp32:esp32"},
+          {name: "ESP32-S3", fqbn: "esp32:esp32:esp32s3"},
+          {name: "ESP32-C3", fqbn: "esp32:esp32:esp32c3"}
+        ]
     
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v3
+      - name: Checkout Code
+        uses: actions/checkout@v4
 
       - name: Install Arduino CLI
         run: |
           curl -fsSL https://raw.githubusercontent.com/arduino/arduino-cli/master/install.sh | sh
           sudo mv bin/arduino-cli /usr/local/bin/
 
-      - name: Install ESP32 Core
+      - name: Setup ESP32 Core 3.0.7
         run: |
-          arduino-cli core update-index
-          arduino-cli core install esp32:esp32
+          arduino-cli core update-index --additional-urls https://espressif.github.io/arduino-esp32/package_esp32_index.json
+          arduino-cli core install esp32:esp32@3.0.7 --additional-urls https://espressif.github.io/arduino-esp32/package_esp32_index.json
 
-      - name: Compile for ESP32-C3
+      - name: Compile Firmware
         run: |
-          arduino-cli compile --fqbn esp32:esp32:esp32c3 --output-dir ./build/c3 .
+          arduino-cli compile --fqbn ${{ matrix.board.fqbn }} --output-dir ./build/${{ matrix.board.name }} .
 
-      - name: Compile for ESP32-S3
-        run: |
-          arduino-cli compile --fqbn esp32:esp32:esp32s3 --output-dir ./build/s3 .
-
-      - name: Upload Binaries
-        uses: actions/upload-artifact@v3
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@v4
         with:
-          name: esp32-firmware
-          path: ./build/
+          name: ${{ matrix.board.name }}-Firmware
+          path: ./build/${{ matrix.board.name }}/
           
