@@ -3,13 +3,13 @@ name: Multi-Board ESP32 Build & Release
 on:
   push:
     branches:
-      - main  # Berjalan setiap kali kamu update kode di branch main
-  workflow_dispatch: # Memungkinkan kamu menjalankan manual jika mau
+      - main
+  workflow_dispatch:
 
 jobs:
   build:
     runs-on: ubuntu-latest
-    permissions: # Izin penting agar GitHub bisa mengunggah file ke Release
+    permissions:
       contents: write
     strategy:
       matrix:
@@ -23,6 +23,10 @@ jobs:
       - name: Checkout Code
         uses: actions/checkout@v4
 
+      - name: Get Timestamp
+        id: timestamp
+        run: echo "time=$(date +'%Y%m%d-%H%M')" >> $GITHUB_OUTPUT
+
       - name: Install Arduino CLI
         run: |
           curl -fsSL https://raw.githubusercontent.com/arduino/arduino-cli/master/install.sh | sh
@@ -35,19 +39,16 @@ jobs:
 
       - name: Compile Firmware
         run: |
-          # Kita beri nama file output yang unik agar tidak tertukar
           arduino-cli compile --fqbn ${{ matrix.board.fqbn }} --output-dir ./build/${{ matrix.board.name }} .
-          mv ./build/${{ matrix.board.name }}/*.ino.bin ./build/${{ matrix.board.name }}/${{ matrix.board.name }}.bin
+          # Penamaan file dengan timestamp
+          mv ./build/${{ matrix.board.name }}/*.ino.bin ./build/${{ matrix.board.name }}/${{ matrix.board.name }}-${{ steps.timestamp.outputs.time }}.bin
 
       - name: Upload to Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: latest
           name: "Latest Firmware Build"
-          body: "Firmware terbaru hasil kompilasi otomatis. Update terakhir: ${{ github.event.head_commit.timestamp }}"
-          draft: false
-          prerelease: false
-          files: |
-            build/${{ matrix.board.name }}/${{ matrix.board.name }}.bin
+          body: "Riwayat build otomatis. Gunakan file dengan timestamp terbaru."
+          files: build/${{ matrix.board.name }}/*.bin
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
