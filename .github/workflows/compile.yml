@@ -1,11 +1,16 @@
+name: Multi-Board ESP32 Build & Release
 
-name: Multi-Board ESP32 Build
-
-on: [push, workflow_dispatch]
+on:
+  push:
+    branches:
+      - main  # Berjalan setiap kali kamu update kode di branch main
+  workflow_dispatch: # Memungkinkan kamu menjalankan manual jika mau
 
 jobs:
   build:
     runs-on: ubuntu-latest
+    permissions: # Izin penting agar GitHub bisa mengunggah file ke Release
+      contents: write
     strategy:
       matrix:
         board: [
@@ -30,11 +35,19 @@ jobs:
 
       - name: Compile Firmware
         run: |
+          # Kita beri nama file output yang unik agar tidak tertukar
           arduino-cli compile --fqbn ${{ matrix.board.fqbn }} --output-dir ./build/${{ matrix.board.name }} .
+          mv ./build/${{ matrix.board.name }}/*.ino.bin ./build/${{ matrix.board.name }}/${{ matrix.board.name }}.bin
 
-      - name: Upload Artifacts
-        uses: actions/upload-artifact@v4
+      - name: Upload to Release
+        uses: softprops/action-gh-release@v2
         with:
-          name: ${{ matrix.board.name }}-Firmware
-          path: ./build/${{ matrix.board.name }}/
-          
+          tag_name: latest
+          name: "Latest Firmware Build"
+          body: "Firmware terbaru hasil kompilasi otomatis. Update terakhir: ${{ github.event.head_commit.timestamp }}"
+          draft: false
+          prerelease: false
+          files: |
+            build/${{ matrix.board.name }}/${{ matrix.board.name }}.bin
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
