@@ -7,8 +7,11 @@ Sistem ini melakukan kompilasi otomatis setiap ada perubahan kode di branch utam
 - **ESP32-S3**: Core Xtensa LX7
 - **ESP32-C3**: Core RISC-V
 
+## Konfigurasi Core
+- **Core 2.0.17 (LTS)**: Digunakan khusus untuk **ESP32 Dev Kit V1**.
+- **Core 3.0.7**: Digunakan untuk **ESP32-S3** dan **ESP32-C3** untuk mendukung fitur hardware terbaru.
+
 ## Informasi Teknis
-- **Arduino Core**: v3.0.7
 - **Metode**: GitHub Actions & GitHub Releases
 - **Penamaan File**: `[NamaBoard]-[YYYYMMDD]-[HHMM].bin`
 
