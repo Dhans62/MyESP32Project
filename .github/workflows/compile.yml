@@ -1,4 +1,4 @@
-name: Dual-Core ESP32 Build
+name: Multi-Platform Dual-Core Build
 
 on:
   push:
@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
 
 jobs:
-  # JOB 1: KHUSUS UNTUK ESP32 KLASIK
+  # JOB 1: Untuk Board ESP32 Klasik menggunakan Core LTS (Stabil)
   build-classic:
     runs-on: ubuntu-latest
     permissions:
@@ -29,8 +29,10 @@ jobs:
 
       - name: Compile ESP32 Classic
         run: |
+          mkdir -p ./build/Classic
           arduino-cli compile --fqbn esp32:esp32:esp32 --output-dir ./build/Classic .
-          mv ./build/Classic/*.bin ./build/Classic/ESP32-V1-LTS-${{ steps.timestamp.outputs.time }}.bin
+          # Mencari file .bin dan menamainya secara universal
+          find ./build/Classic -name "*.ino.bin" -exec mv {} ./build/Classic/Firmware-V1-LTS-${{ steps.timestamp.outputs.time }}.bin \;
 
       - name: Upload Release Classic
         uses: softprops/action-gh-release@v2
@@ -40,7 +42,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-  # JOB 2: UNTUK S3 DAN C3 (FITUR MODERN)
+  # JOB 2: Untuk Board Generasi Baru (S3/C3) menggunakan Core Modern
   build-modern:
     runs-on: ubuntu-latest
     permissions:
@@ -68,8 +70,10 @@ jobs:
 
       - name: Compile Modern Boards
         run: |
+          mkdir -p ./build/${{ matrix.board.name }}
           arduino-cli compile --fqbn ${{ matrix.board.fqbn }} --output-dir ./build/${{ matrix.board.name }} .
-          mv ./build/${{ matrix.board.name }}/*.bin ./build/${{ matrix.board.name }}/${{ matrix.board.name }}-v3-${{ steps.timestamp.outputs.time }}.bin
+          # Mencari file .bin dan menamainya secara universal
+          find ./build/${{ matrix.board.name }} -name "*.ino.bin" -exec mv {} ./build/${{ matrix.board.name }}/${{ matrix.board.name }}-v3-${{ steps.timestamp.outputs.time }}.bin \;
 
       - name: Upload Release Modern
         uses: softprops/action-gh-release@v2
@@ -78,3 +82,4 @@ jobs:
           files: build/${{ matrix.board.name }}/*.bin
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          
