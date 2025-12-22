@@ -1,417 +1,706 @@
-// =====================================================
-// Honda K-Line Scanner - Verified Protocol Implementation
-// Based on proven YouTube reference, adapted for PC817 hardware
-// Hardware: ESP32, PC817 TX, BC547 RX
-// =====================================================
+#include <WiFi.h>
+#include <WebServer.h>
+#include <Update.h>
+#include "web.h"
+#include "driver/gpio.h"
+#include "driver/uart.h"
 
-#include <HardwareSerial.h>
+// ==================== HARDWARE ====================
+HardwareSerial KLine = Serial2;
 
-#define K_LINE_RX 16
-#define K_LINE_TX 17
-#define K_LINE_BAUD 10400
-#define DEBUG_BAUD 115200
+const int KLINE_TX_PIN = 17;
+const int KLINE_RX_PIN = 16;
+const int LED_PIN = 2;
+
+// ==================== WIFI ====================
+const char* ap_ssid = "HONDA_KLINE_AP";
+const char* ap_pass = "12345678";
+IPAddress localIP(192,168,4,1);
+IPAddress gateway(192,168,4,1);
+IPAddress subnet(255,255,255,0);
+
+WebServer server(80);
+
+// ==================== LOGGING ====================
+#define LOG_LINES 200
+String logs[LOG_LINES];
+int logHead = 0;
+int logCount = 0;
+
+void addLog(const String &s) {
+  String t = String(millis()) + " | " + s;
+  logs[logHead] = t;
+  logHead = (logHead + 1) % LOG_LINES;
+  if (logCount < LOG_LINES) logCount++;
+  Serial.println(t);
+}
+
+String getLogs() {
+  String out;
+  int start = (logHead - logCount + LOG_LINES) % LOG_LINES;
+  for (int i = 0; i < logCount; ++i) {
+    out += logs[(start + i) % LOG_LINES] + "\n";
+  }
+  return out;
+}
+
+// ==================== ECU STATE ====================
+String connectedProtocol = "NONE";
+byte ecuMode = 0;
+bool ecuConnected = false;
+
+unsigned long lastConnectionAttempt = 0;
+const unsigned long RECONNECT_INTERVAL = 5000;
+int connectionFailCount = 0;
+const int MAX_FAIL_BEFORE_REBOOT = 10;
+
+// ✅ FIX: Separate watchdogs untuk data dan connection health
+unsigned long lastValidData = 0;
+unsigned long lastSuccessfulPoll = 0;
+const unsigned long DATA_TIMEOUT = 15000;  // 15s tolerance (lebih generous)
+const unsigned long POLL_TIMEOUT = 3000;   // 3s per-poll timeout
 
 #define PACKET_BUFFER_SIZE 128
 
-HardwareSerial bike(2);
+// ==================== ECU DATA ====================
+struct ECUData {
+  int rpm = 0;
+  float tpsv = 0;
+  int tpsp = 0;
+  float eotv = 0;
+  int eotc = 0;
+  float ectv = 0;
+  int ectc = 0;
+  int iatv = 0;
+  int iatc = 0;
+  int mapv = 0;
+  int mapk = 0;
+  float batv = 0;
+  float injj = 0;
+  float ckpp = 0;
+  int spdk = 0;
+  float oxigenv = 0;
+  float oxigens = 0;
+  bool valid = false;
+  
+  unsigned long totalPackets = 0;
+  unsigned long errorPackets = 0;
+  unsigned long lastUpdateTime = 0;
+} liveECU;
 
-// ECU Communication Protocol
+// ==================== PROTOCOL DATA ====================
 byte ECU_WAKEUP_MESSAGE[] = {0xFE, 0x04, 0x72, 0x8C};
 byte ECU_INIT_MESSAGE[] = {0x72, 0x05, 0x00, 0xF0, 0x99};
 
-// ECU State
-bool ecuConnected = false;
-byte ecuTableType = 0;  // 11, 17, 10, atau 0 jika tidak terdeteksi
-byte displayMode = 0;   // Untuk tracking mode display
-
-// Live Data Variables
-int rpm = 0;
-float tpsv = 0.0;
-int tpsp = 0;
-float batv = 0.0;
-float ectv = 0.0;
-int ectc = 0;
-float eotv = 0.0;
-int eotc = 0;
-float injj = 0.0;
-
-// Timing
-unsigned long lastPollTime = 0;
-const unsigned long POLL_INTERVAL = 100;  // 10Hz
-
-void setup() {
-  Serial.begin(DEBUG_BAUD);
-  delay(2000);
-  
-  Serial.println("\n========================================");
-  Serial.println("  Honda K-Line Diagnostic Scanner");
-  Serial.println("  Hardware: PC817 + BC547");
-  Serial.println("  Protocol: ISO-9141 (Honda Modified)");
-  Serial.println("========================================\n");
-  
-  // Initialize K-Line with hardware inversion for BC547
-  initKLineUART();
-  
-  // Execute wake-up sequence (CRITICAL: Double wake-up per Honda requirement)
-  Serial.println("[INIT] Starting Honda double wake-up sequence...");
-  if (!initComms()) {
-    Serial.println("[ERROR] Failed to initialize K-Line timing");
-    return;
-  }
-  
-  // Perform ECU handshake
-  Serial.println("[INIT] Sending wake-up and init messages...");
-  if (!performECUHandshake()) {
-    Serial.println("[ERROR] ECU handshake failed");
-    Serial.println("[INFO] Check: 1) K-Line connection, 2) Ignition ON, 3) Ground connection");
-    return;
-  }
-  
-  // Detect ECU table type
-  Serial.println("\n[DETECT] Probing ECU table types...");
-  detectECUTableType();
-  
-  if (ecuTableType == 0) {
-    Serial.println("[ERROR] Could not identify ECU table type");
-    Serial.println("[INFO] ECU may not be compatible or communication is unstable");
-    return;
-  }
-  
-  Serial.printf("[SUCCESS] ECU detected with Table %d support\n", ecuTableType);
-  Serial.println("\n[READY] Starting live data polling...\n");
-  ecuConnected = true;
+// ==================== HELPER FUNCTIONS ====================
+void forceGpioRelease(int pin) {
+  gpio_reset_pin((gpio_num_t)pin);
+  gpio_set_direction((gpio_num_t)pin, GPIO_MODE_INPUT);
+  gpio_set_pull_mode((gpio_num_t)pin, GPIO_FLOATING);
+  delay(10);
 }
 
-void loop() {
-  if (!ecuConnected) {
-    Serial.println("[ERROR] ECU not connected. System halted.");
-    delay(5000);
-    return;
-  }
+void nukeUART() {
+  while(KLine.available()) KLine.read();
+  KLine.flush();
+  KLine.end();
+  uart_driver_delete(UART_NUM_2);
+  forceGpioRelease(KLINE_TX_PIN);
+  forceGpioRelease(KLINE_RX_PIN);
+  delay(50);
+}
+
+uint8_t calcChecksum(const uint8_t* data, uint8_t len) {
+  uint8_t cksum = 0;
+  for (uint8_t i = 0; i < len; i++) cksum -= data[i];
+  return cksum;
+}
+
+// ==================== CONVERSION FUNCTIONS ====================
+float calcValueDivide256(float val) { return (val * 5) / 256; }
+float calcValueMinus40(int val) { return val - 40; }
+float calcValueDivide10(float val) { return val / 10; }
+float ckp(float val) { return (val * 265.5) / 65.535; }
+float inj(float val) { return (val) / (65535 * 265.5); }
+
+// ==================== INIT PULSE ====================
+int initComms() {
+  // CRITICAL: Hardware Anda pakai NPN transistor low-side switch
+  // GPIO HIGH = Transistor ON = K-Line ditarik ke GND (0V)
+  // GPIO LOW = Transistor OFF = K-Line pull-up ke 12V
   
-  // Poll ECU data based on detected table type
-  unsigned long currentTime = millis();
-  if (currentTime - lastPollTime >= POLL_INTERVAL) {
-    lastPollTime = currentTime;
-    
-    switch(ecuTableType) {
-      case 11:
-        pollTable11();
-        break;
-      case 17:
-        pollTable17();
-        break;
-      case 10:
-        pollTable10();
-        break;
-      default:
-        Serial.println("[ERROR] Invalid table type");
-        ecuConnected = false;
-        return;
+  pinMode(KLINE_TX_PIN, OUTPUT);
+  
+  // PULSE 1: K-Line LOW (0V) selama 70ms
+  digitalWrite(KLINE_TX_PIN, HIGH);  // Transistor ON
+  delay(70);
+  digitalWrite(KLINE_TX_PIN, LOW);   // Transistor OFF → K-Line HIGH
+  delay(130);
+  
+  delay(50);
+  
+  // PULSE 2: K-Line LOW (0V) lagi
+  digitalWrite(KLINE_TX_PIN, HIGH);
+  delay(70);
+  digitalWrite(KLINE_TX_PIN, LOW);
+  delay(130);
+  
+  return 1;
+}
+
+// ✅ FIX: Unified echo flush function
+void flushEcho(int expectedBytes) {
+  int count = 0;
+  unsigned long timeout = millis();
+  
+  while(count < expectedBytes && (millis() - timeout < 100)) {
+    if(KLine.available()) {
+      KLine.read();
+      count++;
     }
-    
-    displayLiveData();
   }
   
-  delay(10);  // Keep loop responsive
+  // Flush any extra garbage
+  delay(10);
+  while(KLine.available()) KLine.read();
 }
 
-void initKLineUART() {
-  bike.begin(K_LINE_BAUD, SERIAL_8N1, K_LINE_RX, K_LINE_TX);
+// ==================== ECU CONNECTION ====================
+bool bangunkan() {
+  nukeUART();
+  delay(100);
   
-  // Enable RX inversion for BC547 compensation
-  uint32_t conf0_addr = 0x3FF6E020;  // UART2_CONF0_REG
-  uint32_t conf0_val = READ_PERI_REG(conf0_addr);
-  conf0_val |= (1 << 19);  // Set RXD_INV bit
-  WRITE_PERI_REG(conf0_addr, conf0_val);
+  initComms();
   
-  Serial.println("[UART] Serial2 initialized at 10400 baud with RX inversion");
+  // RX inversion ON untuk kompensasi BC547 di RX path
+  // TX tidak perlu inversion karena hardware sudah inverted
+  KLine.begin(10400, SERIAL_8N1, KLINE_RX_PIN, KLINE_TX_PIN, true);
   
-  // Flush any residual data
-  while (bike.available()) {
-    bike.read();
+  delay(100);
+  
+  KLine.write(ECU_WAKEUP_MESSAGE, sizeof(ECU_WAKEUP_MESSAGE));
+  delay(200);
+  
+  KLine.write(ECU_INIT_MESSAGE, sizeof(ECU_INIT_MESSAGE));
+  KLine.flush();
+  delay(50);
+  
+  int initBuffCount = 0;
+  byte initBuff[32];
+  
+  while (KLine.available() > 0 && initBuffCount < 32) {
+    initBuff[initBuffCount++] = KLine.read();
   }
-}
-
-bool initComms() {
-  // CRITICAL: Honda requires DOUBLE wake-up sequence
-  // This is non-standard but proven necessary for certain Honda ECUs
   
-  // First wake-up pulse
-  pinMode(K_LINE_TX, OUTPUT);
-  digitalWrite(K_LINE_TX, LOW);
-  delay(70);
-  digitalWrite(K_LINE_TX, HIGH);
-  delay(130);
+  addLog(">>> ECU Connection Attempt");
   
-  // Inter-pulse delay
-  delay(50);
+  if (initBuffCount < 1) {
+    addLog("  ✗ No response");
+    return false;
+  }
   
-  // Second wake-up pulse
-  digitalWrite(K_LINE_TX, LOW);
-  delay(70);
-  digitalWrite(K_LINE_TX, HIGH);
-  delay(130);
+  String rs = "  RX (" + String(initBuffCount) + " bytes): ";
+  for(int i=0; i<initBuffCount && i<10; i++) {
+    if(initBuff[i] < 0x10) rs += "0";
+    rs += String(initBuff[i], HEX) + " ";
+  }
+  addLog(rs);
+  addLog("  ✓ Connected");
   
-  Serial.println("[INIT] Double wake-up pulse completed (70ms+130ms, pause 50ms, 70ms+130ms)");
-  
-  // Re-initialize UART after bitbang
-  initKLineUART();
-  delay(50);
+  connectedProtocol = "HONDA_K-LINE";
   
   return true;
 }
 
-bool performECUHandshake() {
-  // Send wake-up message
-  bike.write(ECU_WAKEUP_MESSAGE, sizeof(ECU_WAKEUP_MESSAGE));
-  bike.flush();
-  delay(200);  // Wait for ECU to process
+// ==================== ECU MODE DETECTION ====================
+void ecu_detect11() {
+  byte data[] = {0x72, 0x05, 0x71, 0x11};
+  byte chk = calcChecksum(data, sizeof(data));
+  byte dataWithChk[] = {0x72, 0x05, 0x71, 0x11, chk};
   
-  // Send init message
-  bike.write(ECU_INIT_MESSAGE, sizeof(ECU_INIT_MESSAGE));
-  bike.flush();
-  delay(50);
+  while(KLine.available()) KLine.read();
   
-  // Read response (includes echo + actual response)
+  KLine.write(dataWithChk, sizeof(dataWithChk));
+  delay(60);  // Tunggu TX selesai
+  
+  flushEcho(5);  // Buang echo 5 bytes
+  
   int buffCount = 0;
-  byte buff[32];
-  unsigned long startTime = millis();
+  byte buff[PACKET_BUFFER_SIZE];
+  unsigned long timeout = millis();
   
-  while ((millis() - startTime < 500) && (buffCount < 32)) {
-    if (bike.available()) {
-      buff[buffCount++] = bike.read();
+  while ((millis() - timeout < 200) && (buffCount < PACKET_BUFFER_SIZE)) {
+    if(KLine.available()) {
+      buff[buffCount++] = KLine.read();
     }
   }
   
-  Serial.printf("[HANDSHAKE] Received %d bytes: ", buffCount);
-  for (int i = 0; i < buffCount; i++) {
-    Serial.printf("%02X ", buff[i]);
-  }
-  Serial.println();
+  addLog("  Mode 0x11: " + String(buffCount) + " bytes");
   
-  // Calculate checksum of response (validation per reference code)
-  int checksum = 0;
-  for (int i = 0; i < buffCount; i++) {
-    checksum += buff[i];
+  if (buffCount == 30) {
+    ecuMode = 11;
+    addLog("    ✓ Mode 0x11 detected (standard)");
+  } else if (buffCount == 29) {
+    ecuMode = 71;
+    addLog("    ✓ Mode 0x11 detected (sport variant)");
+  }
+}
+
+void ecu_detect17() {
+  if(ecuMode != 0) return;
+  
+  byte data[] = {0x72, 0x05, 0x71, 0x17};
+  byte chk = calcChecksum(data, sizeof(data));
+  byte dataWithChk[] = {0x72, 0x05, 0x71, 0x17, chk};
+  
+  while(KLine.available()) KLine.read();
+  
+  KLine.write(dataWithChk, sizeof(dataWithChk));
+  delay(60);
+  
+  flushEcho(5);
+  
+  int buffCount = 0;
+  byte buff[PACKET_BUFFER_SIZE];
+  unsigned long timeout = millis();
+  
+  while ((millis() - timeout < 200) && (buffCount < PACKET_BUFFER_SIZE)) {
+    if(KLine.available()) {
+      buff[buffCount++] = KLine.read();
+    }
   }
   
-  // Reference code uses checksum == 0x600 as success indicator
-  // This is empirical validation, not standard protocol
-  if (checksum == 0x600 || buffCount >= 10) {
-    Serial.println("[HANDSHAKE] ECU responded successfully");
-    return true;
+  addLog("  Mode 0x17: " + String(buffCount) + " bytes");
+  
+  if (buffCount == 28) {
+    ecuMode = 17;
+    addLog("    ✓ Mode 0x17 detected (standard)");
+  } else if (buffCount == 29) {
+    ecuMode = 173;
+    addLog("    ✓ Mode 0x17 detected (ESP variant)");
+  }
+}
+
+void ecu_detect10() {
+  if(ecuMode != 0) return;
+  
+  byte data[] = {0x72, 0x05, 0x71, 0x10};
+  byte chk = calcChecksum(data, sizeof(data));
+  byte dataWithChk[] = {0x72, 0x05, 0x71, 0x10, chk};
+  
+  while(KLine.available()) KLine.read();
+  
+  KLine.write(dataWithChk, sizeof(dataWithChk));
+  delay(60);
+  
+  flushEcho(5);
+  
+  int buffCount = 0;
+  byte buff[PACKET_BUFFER_SIZE];
+  unsigned long timeout = millis();
+  
+  while ((millis() - timeout < 200) && (buffCount < PACKET_BUFFER_SIZE)) {
+    if(KLine.available()) {
+      buff[buffCount++] = KLine.read();
+    }
   }
   
-  Serial.printf("[HANDSHAKE] Unexpected checksum: 0x%X (expected 0x600)\n", checksum);
+  addLog("  Mode 0x10: " + String(buffCount) + " bytes");
+  
+  if (buffCount == 27) {
+    ecuMode = 10;
+    addLog("    ✓ Mode 0x10 detected (sport)");
+  }
+}
+
+// ==================== READ DATA WITH UNIFIED ECHO HANDLING ====================
+void data_11() {
+  byte request[] = {0x72, 0x05, 0x71, 0x11};
+  byte chk = calcChecksum(request, sizeof(request));
+  byte dataWithChk[] = {0x72, 0x05, 0x71, 0x11, chk};
+  
+  while(KLine.available()) KLine.read();
+  
+  KLine.write(dataWithChk, sizeof(dataWithChk));
+  delay(60);
+  
+  flushEcho(5);  // ✅ Consistent echo handling
+  
+  int buffCount = 0;
+  byte buff[PACKET_BUFFER_SIZE];
+  unsigned long readTimeout = millis();
+  
+  while (millis() - readTimeout < 150) {
+    if (KLine.available()) {
+      buff[buffCount++] = KLine.read();
+      if (buffCount >= PACKET_BUFFER_SIZE) break;
+    }
+  }
+
+  int start = -1;
+  for(int i = 0; i < (buffCount - 1); i++) {
+    if(buff[i] == 0x02 && (buff[i+1] == 0x1D || buff[i+1] == 0x1C)) {
+      start = i;
+      break;
+    }
+  }
+
+  if(start != -1 && (buffCount - start) >= 20) {
+    liveECU.rpm = (buff[start + 10] * 256) + buff[start + 11];
+    liveECU.tpsp = (buff[start + 12] * 100) / 255;
+    liveECU.ectc = buff[start + 13] - 40;
+    liveECU.batv = buff[start + 16] / 10.0;
+    liveECU.spdk = buff[start + 17];
+
+    liveECU.valid = true;
+    liveECU.totalPackets++;
+    liveECU.lastUpdateTime = millis();
+    lastValidData = millis();  // ✅ Update watchdog
+    lastSuccessfulPoll = millis();
+  } else {
+    liveECU.errorPackets++;
+    liveECU.valid = false;
+  }
+}
+
+void data_17() {
+  byte data[] = {0x72, 0x05, 0x71, 0x17};
+  byte chk = calcChecksum(data, sizeof(data));
+  byte dataWithChk[] = {0x72, 0x05, 0x71, 0x17, chk};
+  
+  while(KLine.available()) KLine.read();
+  
+  KLine.write(dataWithChk, sizeof(dataWithChk));
+  delay(60);
+  
+  flushEcho(5);  // ✅ FIX: Tambah echo handling yang hilang
+  
+  int buffCount = 0;
+  byte buff[PACKET_BUFFER_SIZE];
+  unsigned long timeout = millis();
+  
+  while ((millis() - timeout < 150) && (buffCount < PACKET_BUFFER_SIZE)) {
+    if(KLine.available()) {
+      buff[buffCount++] = KLine.read();
+    }
+  }
+  
+  liveECU.totalPackets++;
+  
+  if(buffCount >= 22) {
+    liveECU.rpm = (buff[9] * 100);
+    liveECU.tpsp = (buff[10] * 100) / 255;
+    liveECU.ectc = buff[11] - 40;
+    liveECU.iatc = buff[12] - 40;
+    liveECU.mapk = buff[13];
+    liveECU.batv = buff[14] / 10.0;
+    liveECU.spdk = buff[15];
+    
+    liveECU.injj = inj((buff[18] * 256) + buff[19]);
+    liveECU.ckpp = ckp((buff[20] * 256) + buff[21]);
+    
+    liveECU.valid = true;
+    liveECU.lastUpdateTime = millis();
+    lastValidData = millis();  // ✅ Update watchdog
+    lastSuccessfulPoll = millis();
+  } else {
+    liveECU.errorPackets++;
+    liveECU.valid = false;
+  }
+}
+
+void data_10() {
+  byte data[] = {0x72, 0x05, 0x71, 0x10};
+  byte chk = calcChecksum(data, sizeof(data));
+  byte dataWithChk[] = {0x72, 0x05, 0x71, 0x10, chk};
+  
+  while(KLine.available()) KLine.read();
+  
+  KLine.write(dataWithChk, sizeof(dataWithChk));
+  delay(60);
+  
+  flushEcho(5);  // ✅ FIX: Tambah echo handling yang hilang
+  
+  int buffCount = 0;
+  byte buff[PACKET_BUFFER_SIZE];
+  unsigned long timeout = millis();
+  
+  while ((millis() - timeout < 150) && (buffCount < PACKET_BUFFER_SIZE)) {
+    if(KLine.available()) {
+      buff[buffCount++] = KLine.read();
+    }
+  }
+  
+  liveECU.totalPackets++;
+  
+  if(buffCount >= 17) {
+    liveECU.rpm = (buff[9] * 100);
+    liveECU.tpsp = (buff[10] * 100) / 255;
+    liveECU.ectc = buff[12] - 40;
+    liveECU.iatc = buff[13] - 40;
+    liveECU.mapk = buff[14];
+    liveECU.batv = buff[15] / 10.0;
+    liveECU.spdk = buff[16];
+    
+    liveECU.valid = true;
+    liveECU.lastUpdateTime = millis();
+    lastValidData = millis();  // ✅ Update watchdog
+    lastSuccessfulPoll = millis();
+  } else {
+    liveECU.errorPackets++;
+    liveECU.valid = false;
+  }
+}
+
+// ✅ FIX: Reconnect dengan proper watchdog reset
+bool attemptReconnect() {
+  addLog(">>> Auto-reconnect triggered");
+  
+  ecuConnected = false;
+  ecuMode = 0;
+  liveECU.valid = false;
+  
+  if(bangunkan()) {
+    ecuConnected = true;
+    
+    delay(2000);
+    
+    ecu_detect11();
+    delay(200);
+    ecu_detect17();
+    delay(200);
+    ecu_detect10();
+    
+    if(ecuMode != 0) {
+      connectedProtocol = "HONDA_MODE_0x" + String(ecuMode, HEX);
+      addLog("  ✓ Reconnected! Mode: 0x" + String(ecuMode, HEX));
+      
+      // ✅ CRITICAL FIX: Reset ALL watchdog timers
+      lastValidData = millis();
+      lastSuccessfulPoll = millis();
+      connectionFailCount = 0;
+      
+      return true;
+    }
+  }
+  
+  connectionFailCount++;
+  addLog("  ✗ Reconnect failed (" + String(connectionFailCount) + "/" + String(MAX_FAIL_BEFORE_REBOOT) + ")");
+  
   return false;
 }
 
-void detectECUTableType() {
-  // Try Table 11
-  Serial.print("[DETECT] Probing Table 11... ");
-  byte cmd11[] = {0x72, 0x05, 0x71, 0x11, 0x00};
-  cmd11[4] = calcChecksum(cmd11, 4);
-  
-  bike.write(cmd11, sizeof(cmd11));
-  bike.flush();
-  delay(50);
-  
-  int count11 = readResponse(200);
-  Serial.printf("Response length: %d bytes\n", count11);
-  
-  if (count11 == 30) {
-    ecuTableType = 11;
-    displayMode = 1;
-    return;
-  } else if (count11 == 29) {
-    ecuTableType = 11;
-    displayMode = 7;  // Sport variant
-    return;
-  }
-  
-  // Try Table 17
-  Serial.print("[DETECT] Probing Table 17... ");
-  byte cmd17[] = {0x72, 0x05, 0x71, 0x17, 0x00};
-  cmd17[4] = calcChecksum(cmd17, 4);
-  
-  bike.write(cmd17, sizeof(cmd17));
-  bike.flush();
-  delay(50);
-  
-  int count17 = readResponse(200);
-  Serial.printf("Response length: %d bytes\n", count17);
-  
-  if (count17 == 28) {
-    ecuTableType = 17;
-    displayMode = 2;
-    return;
-  } else if (count17 == 29) {
-    ecuTableType = 17;
-    displayMode = 3;  // ESP variant
-    return;
-  }
-  
-  // Try Table 10
-  Serial.print("[DETECT] Probing Table 10... ");
-  byte cmd10[] = {0x72, 0x05, 0x71, 0x10, 0x00};
-  cmd10[4] = calcChecksum(cmd10, 4);
-  
-  bike.write(cmd10, sizeof(cmd10));
-  bike.flush();
-  delay(50);
-  
-  int count10 = readResponse(200);
-  Serial.printf("Response length: %d bytes\n", count10);
-  
-  if (count10 == 27) {
-    ecuTableType = 10;
-    displayMode = 8;
-    return;
-  }
-  
-  // No table detected
-  ecuTableType = 0;
+// ==================== WEB HANDLERS ====================
+void handleRoot() { 
+  server.send(200, "text/html", PAGE_HTML); 
 }
 
-int readResponse(unsigned long timeoutMs) {
-  byte buff[PACKET_BUFFER_SIZE];
-  int buffCount = 0;
-  unsigned long startTime = millis();
+void handleLogs() { 
+  server.send(200, "text/plain", getLogs()); 
+}
+
+void handleData() {
+  String json = "{";
+  json += "\"connected\":" + String(ecuConnected ? "true" : "false") + ",";
+  json += "\"mode\":\"0x" + String(ecuMode, HEX) + "\",";
+  json += "\"rpm\":" + String(liveECU.rpm) + ",";
+  json += "\"tps\":" + String(liveECU.tpsp) + ",";
+  json += "\"temp\":" + String(liveECU.ectc) + ",";
+  json += "\"speed\":" + String(liveECU.spdk) + ",";
+  json += "\"battery\":" + String(liveECU.batv) + ",";
+  json += "\"valid\":" + String(liveECU.valid ? "true" : "false") + ",";
+  json += "\"totalPackets\":" + String(liveECU.totalPackets) + ",";
+  json += "\"errorPackets\":" + String(liveECU.errorPackets) + ",";
+  json += "\"uptime\":" + String(millis() / 1000);
+  json += "}";
+  server.send(200, "application/json", json);
+}
+
+void handleStatus() {
+  String json = "{";
+  json += "\"connected\":" + String(ecuConnected ? "true" : "false") + ",";
+  json += "\"protocol\":\"" + connectedProtocol + "\"";
+  json += "}";
+  server.send(200, "application/json", json);
+}
+
+void handleReconnect() {
+  if(attemptReconnect()) {
+    server.send(200, "text/plain", "OK");
+  } else {
+    server.send(500, "text/plain", "FAIL");
+  }
+}
+
+void handleNotFound() { 
+  server.send(404, "text/plain", "Not Found"); 
+}
+
+void handleUpdatePage() { 
+  server.send(200, "text/html", PAGE_OTA_HTML); 
+}
+
+void handleDoUpdate() {
+  HTTPUpload& upload = server.upload();
   
-  while ((millis() - startTime < timeoutMs) && (buffCount < PACKET_BUFFER_SIZE)) {
-    if (bike.available()) {
-      buff[buffCount++] = bike.read();
+  if (upload.status == UPLOAD_FILE_START) {
+    addLog("OTA: " + upload.filename);
+    if (!Update.begin()) {
+      Update.printError(Serial);
+    }
+  } 
+  else if (upload.status == UPLOAD_FILE_WRITE) {
+    Update.write(upload.buf, upload.currentSize);
+  } 
+  else if (upload.status == UPLOAD_FILE_END) {
+    if (Update.end(true)) {
+      addLog("OTA SUCCESS");
+    } else {
+      Update.printError(Serial);
+    }
+  }
+}
+
+void handleUpdateFinish() {
+  if (Update.hasError()) {
+    server.send(500, "text/plain", "FAIL");
+  } else {
+    server.send(200, "text/plain", "OK\nRebooting...");
+    delay(2500);
+    ESP.restart();
+  }
+}
+
+// ==================== SETUP ====================
+void setup() {
+  pinMode(LED_PIN, OUTPUT);
+  digitalWrite(LED_PIN, LOW);
+  
+  Serial.begin(115200);
+  delay(200);
+  
+  addLog("════════════════════════════════");
+  addLog("Honda OBD Scanner v13.0");
+  addLog("════════════════════════════════");
+  
+  uart_driver_delete(UART_NUM_2);
+  forceGpioRelease(KLINE_TX_PIN);
+  forceGpioRelease(KLINE_RX_PIN);
+  addLog("✓ GPIO init");
+  
+  WiFi.mode(WIFI_AP);
+  delay(200);
+  WiFi.softAPConfig(localIP, gateway, subnet);
+  WiFi.softAP(ap_ssid, ap_pass);
+  addLog("✓ AP: " + String(ap_ssid));
+  addLog("✓ IP: " + WiFi.softAPIP().toString());
+  
+  server.on("/", HTTP_GET, handleRoot);
+  server.on("/logs", HTTP_GET, handleLogs);
+  server.on("/data", HTTP_GET, handleData);
+  server.on("/status", HTTP_GET, handleStatus);
+  server.on("/reconnect", HTTP_POST, handleReconnect);
+  server.on("/update", HTTP_GET, handleUpdatePage);
+  server.on("/update", HTTP_POST, handleUpdateFinish, handleDoUpdate);
+  server.onNotFound(handleNotFound);
+  server.begin();
+  
+  addLog("✓ Web: http://192.168.4.1/");
+  addLog("════════════════════════════════");
+  
+  addLog("Connecting to ECU...");
+  delay(1000);
+  
+  if(bangunkan()) {
+    ecuConnected = true;
+    digitalWrite(LED_PIN, HIGH);
+    
+    addLog("Waiting 4 seconds for ECU ready...");
+    delay(4000);
+    
+    ecu_detect11();
+    delay(200);
+    ecu_detect17();
+    delay(200);
+    ecu_detect10();
+    
+    if(ecuMode != 0) {
+      connectedProtocol = "HONDA_MODE_0x" + String(ecuMode, HEX);
+      addLog("✓ Mode: 0x" + String(ecuMode, HEX));
+      addLog("✓ Ready!");
+      
+      // ✅ CRITICAL: Initialize watchdog timers on successful connect
+      lastValidData = millis();
+      lastSuccessfulPoll = millis();
+    } else {
+      addLog("✗ Mode detection failed");
+      ecuConnected = false;
+      digitalWrite(LED_PIN, LOW);
+    }
+  } else {
+    addLog("✗ ECU connection failed");
+    ecuConnected = false;
+    digitalWrite(LED_PIN, LOW);
+  }
+}
+
+// ==================== LOOP ====================
+unsigned long lastDataRequest = 0;
+const unsigned long DATA_INTERVAL = 500;
+
+void loop() {
+  server.handleClient();
+  
+  // ✅ FIX: Reconnect logic dengan proper timing check
+  if(!ecuConnected) {
+    unsigned long now = millis();
+    if(now - lastConnectionAttempt >= RECONNECT_INTERVAL) {
+      lastConnectionAttempt = now;
+      
+      if(attemptReconnect()) {
+        digitalWrite(LED_PIN, HIGH);
+      } else {
+        if(connectionFailCount >= MAX_FAIL_BEFORE_REBOOT) {
+          addLog("!!! Too many failures, rebooting...");
+          delay(2000);
+          ESP.restart();
+        }
+      }
+    }
+    
+    digitalWrite(LED_PIN, LOW);
+    return;
+  }
+  
+  // ✅ FIX: Watchdog hanya trigger jika benar-benar tidak ada data
+  // DAN sudah lewat timeout periode
+  if(ecuConnected && (millis() - lastValidData > DATA_TIMEOUT)) {
+    // Additional check: pastikan kita sudah coba poll minimal 1x
+    if(millis() - lastSuccessfulPoll > POLL_TIMEOUT) {
+      addLog("!!! Data timeout after " + String(DATA_TIMEOUT/1000) + "s, reconnecting...");
+      ecuConnected = false;
+      digitalWrite(LED_PIN, LOW);
+      return;
     }
   }
   
-  // Flush any remaining data
-  while (bike.available()) {
-    bike.read();
-  }
-  
-  return buffCount;
-}
-
-uint8_t calcChecksum(const uint8_t* data, uint8_t len) {
-  // Standard Honda checksum: 0x100 - (sum & 0xFF)
-  uint16_t sum = 0;
-  for (uint8_t i = 0; i < len; i++) {
-    sum += data[i];
-  }
-  return (uint8_t)(0x100 - (sum & 0xFF));
-}
-
-void pollTable11() {
-  byte cmd[] = {0x72, 0x07, 0x72, 0x11, 0x00, 0x10, 0x00};
-  cmd[6] = calcChecksum(cmd, 6);
-  
-  bike.write(cmd, sizeof(cmd));
-  bike.flush();
-  delay(50);
-  
-  byte buff[PACKET_BUFFER_SIZE];
-  int buffCount = 0;
-  unsigned long startTime = millis();
-  
-  while ((millis() - startTime < 150) && (buffCount < PACKET_BUFFER_SIZE)) {
-    if (bike.available()) {
-      buff[buffCount++] = bike.read();
+  // Normal data polling loop
+  if (ecuConnected && ecuMode != 0) {
+    unsigned long now = millis();
+    if (now - lastDataRequest >= DATA_INTERVAL) {
+      lastDataRequest = now;
+      
+      if(ecuMode == 11 || ecuMode == 71) { 
+        data_11();
+      } else if(ecuMode == 17 || ecuMode == 173) {
+        data_17();
+      } else if(ecuMode == 10) {
+        data_10();
+      }
+      
+      if(liveECU.valid) {
+        digitalWrite(LED_PIN, !digitalRead(LED_PIN));
+      }
     }
   }
-  
-  if (buffCount < 20) {
-    Serial.println("[POLL] Insufficient data from Table 11");
-    return;
-  }
-  
-  // Parse data (skip echo bytes 0-6, data starts at index 7)
-  int dataStart = 7;
-  
-  // RPM: bytes 11-12 (word, big endian)
-  rpm = (buff[dataStart + 4] << 8) | buff[dataStart + 5];
-  
-  // Battery Voltage: byte 13
-  batv = calcValueDivide256(buff[dataStart + 6]);
-  
-  // TPS: byte 14
-  tpsp = (buff[dataStart + 7] * 100) / 255;
-  tpsv = calcValueDivide256(buff[dataStart + 7]);
-  
-  // ECT: byte 15
-  ectc = buff[dataStart + 8] - 40;
-  ectv = calcValueDivide256(buff[dataStart + 8]);
-  
-  // Injector duration: bytes 18-19
-  uint16_t injRaw = (buff[dataStart + 11] << 8) | buff[dataStart + 12];
-  injj = injRaw / (65535.0 * 265.5);
-}
-
-void pollTable17() {
-  byte cmd[] = {0x72, 0x07, 0x72, 0x17, 0x00, 0x10, 0x00};
-  cmd[6] = calcChecksum(cmd, 6);
-  
-  bike.write(cmd, sizeof(cmd));
-  bike.flush();
-  delay(50);
-  
-  byte buff[PACKET_BUFFER_SIZE];
-  int buffCount = 0;
-  unsigned long startTime = millis();
-  
-  while ((millis() - startTime < 150) && (buffCount < PACKET_BUFFER_SIZE)) {
-    if (bike.available()) {
-      buff[buffCount++] = bike.read();
-    }
-  }
-  
-  if (buffCount < 20) {
-    Serial.println("[POLL] Insufficient data from Table 17");
-    return;
-  }
-  
-  // Similar parsing logic for Table 17
-  // Structure may differ slightly from Table 11
-  int dataStart = 7;
-  
-  rpm = (buff[dataStart + 4] << 8) | buff[dataStart + 5];
-  batv = calcValueDivide256(buff[dataStart + 6]);
-  tpsp = (buff[dataStart + 7] * 100) / 255;
-}
-
-void pollTable10() {
-  byte cmd[] = {0x72, 0x07, 0x72, 0x10, 0x00, 0x10, 0x00};
-  cmd[6] = calcChecksum(cmd, 6);
-  
-  bike.write(cmd, sizeof(cmd));
-  bike.flush();
-  delay(50);
-  
-  byte buff[PACKET_BUFFER_SIZE];
-  int buffCount = 0;
-  unsigned long startTime = millis();
-  
-  while ((millis() - startTime < 150) && (buffCount < PACKET_BUFFER_SIZE)) {
-    if (bike.available()) {
-      buff[buffCount++] = bike.read();
-    }
-  }
-  
-  if (buffCount < 20) {
-    Serial.println("[POLL] Insufficient data from Table 10");
-    return;
-  }
-  
-  int dataStart = 7;
-  rpm = (buff[dataStart + 4] << 8) | buff[dataStart + 5];
-  batv = calcValueDivide256(buff[dataStart + 6]);
-}
-
-void displayLiveData() {
-  Serial.printf("[DATA] RPM: %d | Battery: %.2fV | TPS: %d%% (%.2fV) | ECT: %d°C (%.2fV) | Inj: %.3fms\n",
-                rpm, batv, tpsp, tpsv, ectc, ectv, injj);
-}
-
-float calcValueDivide256(float val) {
-  return (val * 5.0) / 256.0;
 }
