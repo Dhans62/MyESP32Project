@@ -43,4 +43,3 @@ Gunakan aplikasi flasher di Android (seperti ESP32 Flash/Erase) dengan konfigura
 1. **Pemicu Build**: build akan berjalan otomatis jika mengubah bah isi folder `run-build` atau file `.ino` untuk memulai kompilasi.
 2. **Tambah Library**: Modifikasi file `compaile.yml` pada bagian `Install Core` jika memerlukan library pihak ketiga.
 3. **Validasi**: Selalu pastikan folder proyek memiliki nama yang konsisten dengan file sketsa utama.
-4. 
