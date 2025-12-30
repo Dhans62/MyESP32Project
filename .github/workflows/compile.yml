@@ -24,6 +24,11 @@ jobs:
       - name: Checkout Code
         uses: actions/checkout@v4
 
+      - name: Get Timestamp
+        id: timestamp
+        # Mengambil waktu dalam format YYYYMMDD-HHMM
+        run: echo "time=$(date +'%Y%m%d-%H%M')" >> $GITHUB_OUTPUT
+
       - name: Setup Arduino CLI
         run: |
           curl -fsSL https://raw.githubusercontent.com/arduino/arduino-cli/master/install.sh | sh
@@ -39,27 +44,29 @@ jobs:
       - name: Compile
         run: |
           mkdir -p ./build/${{ matrix.board.name }}
-          # Compile dan hasilkan semua file bin (bootloader, partitions, app)
           arduino-cli compile --fqbn ${{ matrix.board.fqbn }} --output-dir ./build/${{ matrix.board.name }} .
 
       - name: Prepare Release Files
         run: |
           mkdir -p ./dist
+          TS="${{ steps.timestamp.outputs.time }}"
           
-          # 1. Ambil file .bin utama untuk keperluan OTA
-          cp ./build/${{ matrix.board.name }}/*.ino.bin ./dist/${{ matrix.board.name }}-OTA.bin
+          # 1. File OTA dengan Timestamp
+          cp ./build/${{ matrix.board.name }}/*.ino.bin ./dist/${{ matrix.board.name }}-OTA-$TS.bin
           
-          # 2. Buat ZIP Bundle Lengkap untuk Flashing lewat Kabel di Android
+          # 2. Bundle ZIP dengan Timestamp
           cd ./build/${{ matrix.board.name }}
-          zip -r ../../dist/${{ matrix.board.name }}-FullFlash-Bundle.zip .
+          zip -r ../../dist/${{ matrix.board.name }}-FullFlash-$TS.zip .
           
       - name: Release to GitHub
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: latest
+          # Menggunakan tag unik agar tidak menimpa file lama
+          tag_name: "Build-${{ steps.timestamp.outputs.time }}"
+          name: "Release ${{ steps.timestamp.outputs.time }}"
           files: |
             dist/*.bin
             dist/*.zip
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      
+          
