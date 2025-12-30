@@ -1,86 +1,65 @@
-name: Multi-Platform Dual-Core Build
+name: Pro-Build Multi-Platform
 
 on:
   push:
     branches:
       - main
+    paths:
+      - 'run-build/**'
+      - '**.ino'
   workflow_dispatch:
 
 jobs:
-  build-classic:
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    steps:
-      - name: Checkout Code
-        uses: actions/checkout@v4
-
-      - name: Get Timestamp
-        id: timestamp
-        run: echo "time=$(date +'%Y%m%d-%H%M')" >> $GITHUB_OUTPUT
-
-      - name: Setup ESP32 Core 2.0.17 (LTS)
-        run: |
-          curl -fsSL https://raw.githubusercontent.com/arduino/arduino-cli/master/install.sh | sh
-          sudo mv bin/arduino-cli /usr/local/bin/
-          arduino-cli core update-index --additional-urls https://raw.githubusercontent.com/espressif/arduino-esp32/gh-pages/package_esp32_index.json
-          arduino-cli core install esp32:esp32@2.0.17 --additional-urls https://raw.githubusercontent.com/espressif/arduino-esp32/gh-pages/package_esp32_index.json
-
-      - name: Compile ESP32 Classic
-        run: |
-          mkdir -p ./build/Classic
-          arduino-cli compile --fqbn esp32:esp32:esp32 --output-dir ./build/Classic .
-          # Filter: Hanya ambil file .ino.bin utama, abaikan bootloader/partitions
-          find ./build/Classic -type f -name "*.ino.bin" ! -name "*.bootloader.bin" ! -name "*.partitions.bin" -exec mv {} ./build/Classic/Firmware-V1-LTS-${{ steps.timestamp.outputs.time }}.bin \;
-          # Hapus file sisa agar tidak ikut terupload
-          rm -f ./build/Classic/*.bootloader.bin ./build/Classic/*.partitions.bin ./build/Classic/*.merged.bin
-
-      - name: Upload Release Classic
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: latest
-          files: build/Classic/Firmware-V1-LTS-*.bin
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-  build-modern:
+  build:
     runs-on: ubuntu-latest
     permissions:
       contents: write
     strategy:
       matrix:
         board: [
-          {name: "ESP32-S3", fqbn: "esp32:esp32:esp32s3"},
-          {name: "ESP32-C3", fqbn: "esp32:esp32:esp32c3"}
+          {name: "ESP32-Classic", fqbn: "esp32:esp32:esp32", core: "2.0.17"},
+          {name: "ESP32-C3", fqbn: "esp32:esp32:esp32c3", core: "3.0.7"}
         ]
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
 
-      - name: Get Timestamp
-        id: timestamp
-        run: echo "time=$(date +'%Y%m%d-%H%M')" >> $GITHUB_OUTPUT
-
-      - name: Setup ESP32 Core 3.0.7
+      - name: Setup Arduino CLI
         run: |
           curl -fsSL https://raw.githubusercontent.com/arduino/arduino-cli/master/install.sh | sh
           sudo mv bin/arduino-cli /usr/local/bin/
-          arduino-cli core update-index --additional-urls https://espressif.github.io/arduino-esp32/package_esp32_index.json
-          arduino-cli core install esp32:esp32@3.0.7 --additional-urls https://espressif.github.io/arduino-esp32/package_esp32_index.json
+          arduino-cli config init
+          arduino-cli config add board_manager.additional_urls https://raw.githubusercontent.com/espressif/arduino-esp32/gh-pages/package_esp32_index.json
 
-      - name: Compile Modern Boards
+      - name: Install Core
+        run: |
+          arduino-cli core update-index
+          arduino-cli core install esp32:esp32@${{ matrix.board.core }}
+
+      - name: Compile
         run: |
           mkdir -p ./build/${{ matrix.board.name }}
+          # Compile dan hasilkan semua file bin (bootloader, partitions, app)
           arduino-cli compile --fqbn ${{ matrix.board.fqbn }} --output-dir ./build/${{ matrix.board.name }} .
-          # Filter: Hanya ambil file .ino.bin utama
-          find ./build/${{ matrix.board.name }} -type f -name "*.ino.bin" ! -name "*.bootloader.bin" ! -name "*.partitions.bin" -exec mv {} ./build/${{ matrix.board.name }}/${{ matrix.board.name }}-v3-${{ steps.timestamp.outputs.time }}.bin \;
-          rm -f ./build/${{ matrix.board.name }}/*.bootloader.bin ./build/${{ matrix.board.name }}/*.partitions.bin ./build/${{ matrix.board.name }}/*.merged.bin
 
-      - name: Upload Release Modern
+      - name: Prepare Release Files
+        run: |
+          mkdir -p ./dist
+          
+          # 1. Ambil file .bin utama untuk keperluan OTA
+          cp ./build/${{ matrix.board.name }}/*.ino.bin ./dist/${{ matrix.board.name }}-OTA.bin
+          
+          # 2. Buat ZIP Bundle Lengkap untuk Flashing lewat Kabel di Android
+          cd ./build/${{ matrix.board.name }}
+          zip -r ../../dist/${{ matrix.board.name }}-FullFlash-Bundle.zip .
+          
+      - name: Release to GitHub
         uses: softprops/action-gh-release@v2
         with:
           tag_name: latest
-          files: build/${{ matrix.board.name }}/*.bin
+          files: |
+            dist/*.bin
+            dist/*.zip
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          
+      
