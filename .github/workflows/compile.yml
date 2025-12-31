@@ -1,4 +1,4 @@
-name: Pro-Build Multi-Platform
+name: Pro-Build Multi-Platform-Folders
 
 on:
   push:
@@ -6,7 +6,8 @@ on:
       - main
     paths:
       - 'run-build/**'
-      - '**.ino'
+      - 'ESP32-Classic/**'
+      - 'ESP32-C3/**'
   workflow_dispatch:
 
 jobs:
@@ -17,8 +18,8 @@ jobs:
     strategy:
       matrix:
         board: [
-          {name: "ESP32-Classic", fqbn: "esp32:esp32:esp32", core: "2.0.17"},
-          {name: "ESP32-C3", fqbn: "esp32:esp32:esp32c3", core: "3.0.7"}
+          {name: "ESP32-Classic", fqbn: "esp32:esp32:esp32", core: "2.0.17", dir: "ESP32-Classic"},
+          {name: "ESP32-C3", fqbn: "esp32:esp32:esp32c3", core: "3.0.7", dir: "ESP32-C3"}
         ]
     steps:
       - name: Checkout Code
@@ -26,7 +27,6 @@ jobs:
 
       - name: Get Timestamp
         id: timestamp
-        # Mengambil waktu dalam format YYYYMMDD-HHMM
         run: echo "time=$(date +'%Y%m%d-%H%M')" >> $GITHUB_OUTPUT
 
       - name: Setup Arduino CLI
@@ -44,24 +44,21 @@ jobs:
       - name: Compile
         run: |
           mkdir -p ./build/${{ matrix.board.name }}
-          arduino-cli compile --fqbn ${{ matrix.board.fqbn }} --output-dir ./build/${{ matrix.board.name }} .
+          # Kompilasi dari folder spesifik sesuai matrix
+          arduino-cli compile --fqbn ${{ matrix.board.fqbn }} --output-dir ./build/${{ matrix.board.name }} ./${{ matrix.board.dir }}
 
       - name: Prepare Release Files
         run: |
           mkdir -p ./dist
           TS="${{ steps.timestamp.outputs.time }}"
-          
-          # 1. File OTA dengan Timestamp
+          # Ambil file OTA dan ZIP sesuai folder board
           cp ./build/${{ matrix.board.name }}/*.ino.bin ./dist/${{ matrix.board.name }}-OTA-$TS.bin
-          
-          # 2. Bundle ZIP dengan Timestamp
           cd ./build/${{ matrix.board.name }}
           zip -r ../../dist/${{ matrix.board.name }}-FullFlash-$TS.zip .
           
       - name: Release to GitHub
         uses: softprops/action-gh-release@v2
         with:
-          # Menggunakan tag unik agar tidak menimpa file lama
           tag_name: "Build-${{ steps.timestamp.outputs.time }}"
           name: "Release ${{ steps.timestamp.outputs.time }}"
           files: |
