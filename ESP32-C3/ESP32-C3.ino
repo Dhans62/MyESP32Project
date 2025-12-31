@@ -1,8 +1,6 @@
 #include <HardwareSerial.h>
-
 // Gunakan UART1 untuk pengujian hardware
 HardwareSerial testSerial(1); 
-
 // Pin Default ESP32-C3 untuk UART1
 #define RX_PIN 20
 #define TX_PIN 21
