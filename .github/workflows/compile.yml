@@ -16,6 +16,7 @@ jobs:
     permissions:
       contents: write
     strategy:
+      fail-fast: false  # TAMBAHKAN INI: Agar C3 tetap lanjut walau Classic error
       matrix:
         board: [
           {name: "ESP32-Classic", fqbn: "esp32:esp32:esp32", core: "2.0.17", dir: "ESP32-Classic"},
