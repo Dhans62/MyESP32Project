@@ -1,20 +1,20 @@
-// Sketch untuk ESP32-C3 sebagai Bridge
+// Serial Passthrough untuk ESP32-C3
+// Menggunakan USB CDC internal untuk bicara ke HP
+// Menggunakan Hardware Serial (UART1) di pin 20 & 21 untuk bicara ke ESP32 Rusak
+
 void setup() {
-  // Serial adalah USB CDC ke HP Android
-  Serial.begin(115200); 
-  
-  // Serial1 adalah jalur ke ESP32 yang rusak
-  // RX=20, TX=21
+  Serial.begin(115200); // Koneksi USB ke Android
+  // UART1: RX=20, TX=21
   Serial1.begin(115200, SERIAL_8N1, 20, 21); 
 }
 
 void loop() {
-  // HP -> ESP32-C3 -> ESP32 Rusak
-  if (Serial.available()) {
+  // Teruskan data dari HP ke ESP32 Rusak
+  while (Serial.available()) {
     Serial1.write(Serial.read());
   }
-  // ESP32 Rusak -> ESP32-C3 -> HP
-  if (Serial1.available()) {
+  // Teruskan respon dari ESP32 Rusak ke HP
+  while (Serial1.available()) {
     Serial.write(Serial1.read());
   }
 }
