@@ -4,10 +4,9 @@
 #include <BLE2902.h>
 #include <HardwareSerial.h>
 
-// PINOUT ESP32-C3
 #define TX_PIN 21 
 #define RX_PIN 20 
-#define LED_PIN 8   // Biasanya LED bawaan C3 di GPIO 8, sesuaikan kalau beda
+#define LED_PIN 8   // LED bawaan C3 (GPIO 8). Sesuaikan kalau beda.
 #define K_LINE_BAUD 10400
 
 HardwareSerial bike(1);
@@ -18,63 +17,18 @@ HardwareSerial bike(1);
 BLECharacteristic *pTxCharacteristic;
 bool deviceConnected = false;
 
-// ==================== INDIKATOR & LOGGING ====================
 void logToBLE(String msg) {
-  Serial.println(msg); 
   if (deviceConnected) {
-    int maxLen = 20;
-    for(int i = 0; i < msg.length(); i += maxLen) {
-      String chunk = msg.substring(i, min(i + maxLen, (int)msg.length()));
-      pTxCharacteristic->setValue(chunk.c_str());
-      pTxCharacteristic->notify();
-      delay(25); 
-    }
+    pTxCharacteristic->setValue(msg.c_str());
+    pTxCharacteristic->notify();
+    delay(50);
   }
+  Serial.println(msg);
 }
 
-// ==================== K-LINE CORE ====================
-void setupKLineUART() {
-  bike.begin(K_LINE_BAUD, SERIAL_8N1, RX_PIN, TX_PIN);
-  delay(50);
-}
-
-void initPulse() {
-  logToBLE("[INIT] Pulse...");
-  bike.end();
-  pinMode(TX_PIN, OUTPUT);
-  digitalWrite(TX_PIN, LOW);   delay(70);
-  digitalWrite(TX_PIN, HIGH);  delay(130);
-  delay(50);
-  digitalWrite(TX_PIN, LOW);   delay(70);
-  digitalWrite(TX_PIN, HIGH);  delay(130);
-  setupKLineUART();
-}
-
-bool sendRequest(uint8_t* cmd, int len, uint8_t* resBuf, int &resLen) {
-  bike.write(cmd, len);
-  bike.flush();
-  
-  // Buang Echo
-  int echoCount = 0;
-  unsigned long echoT = millis();
-  while ((millis() - echoT < 150) && (echoCount < len)) {
-    if (bike.available()) { bike.read(); echoCount++; }
-  }
-
-  // Baca Respon
-  resLen = 0;
-  unsigned long readT = millis();
-  while ((millis() - readT < 500) && (resLen < 64)) {
-    if (bike.available()) { resBuf[resLen++] = bike.read(); }
-  }
-  return (resLen > 0);
-}
-
-// ==================== BLE CALLBACKS ====================
 class MyServerCallbacks: public BLEServerCallbacks {
     void onConnect(BLEServer* pServer) { 
       deviceConnected = true; 
-      digitalWrite(LED_PIN, HIGH); // Stay ON saat BLE connect
     };
     void onDisconnect(BLEServer* pServer) {
       deviceConnected = false;
@@ -83,11 +37,11 @@ class MyServerCallbacks: public BLEServerCallbacks {
 };
 
 void setup() {
-  pinMode(LED_PIN, OUTPUT);
   Serial.begin(115200);
+  pinMode(LED_PIN, OUTPUT);
   
   // Inisialisasi BLE
-  BLEDevice::init("C3_KLINE_V2");
+  BLEDevice::init("TES_C3_KLINE");
   BLEServer *pServer = BLEDevice::createServer();
   pServer->setCallbacks(new MyServerCallbacks());
   BLEService *pService = pServer->createService(SERVICE_UUID);
@@ -98,32 +52,43 @@ void setup() {
   pTxCharacteristic->addDescriptor(new BLE2902());
   pService->start();
   pServer->getAdvertising()->start();
+
+  // Setup UART K-Line
+  bike.begin(K_LINE_BAUD, SERIAL_8N1, RX_PIN, TX_PIN);
 }
 
 void loop() {
-  // Jika BLE belum connect, LED kedip cepat
   if (!deviceConnected) {
+    // Skenario 1: BLE Belum Connect -> LED Kedip Cepat
     digitalWrite(LED_PIN, HIGH); delay(100);
     digitalWrite(LED_PIN, LOW);  delay(100);
   } else {
-    // Jika sudah connect, coba bangunkan ECU
-    logToBLE("=== START WAKEUP ===");
-    initPulse();
+    // Skenario 2: BLE Connect -> LED Stay ON
+    digitalWrite(LED_PIN, HIGH);
     
-    uint8_t wakeUp[] = {0xFE, 0x04, 0x72, 0x8C};
-    uint8_t rxBuf[32];
-    int rxLen = 0;
+    logToBLE("--- TEST JALUR K-LINE ---");
+    
+    // Kirim satu byte dummy (0xFE) ke K-Line
+    uint8_t testByte = 0xFE;
+    bike.write(testByte);
+    bike.flush();
+    logToBLE("TX Sent: 0xFE");
 
-    if (sendRequest(wakeUp, sizeof(wakeUp), rxBuf, rxLen)) {
-      logToBLE("ECU RESPONDED!");
-      // Kedip lambat tanda sukses komunikasi
-      for(int i=0; i<5; i++) {
-        digitalWrite(LED_PIN, LOW); delay(500);
-        digitalWrite(LED_PIN, HIGH); delay(500);
+    // Cek apakah ada Echo (Data balik dari rangkaian lu sendiri)
+    delay(100);
+    if (bike.available()) {
+      uint8_t echo = bike.read();
+      logToBLE("RX Echo: 0x" + String(echo, HEX));
+      
+      if (echo == testByte) {
+        logToBLE("STATUS: HARDWARE LURUS (ECHO OK)");
+      } else {
+        logToBLE("STATUS: DATA KORUP / SALAH LOGIKA");
       }
     } else {
-      logToBLE("ECU NO RESP");
+      logToBLE("STATUS: NO ECHO (Jalur Putus/6N137 Mati)");
     }
-    delay(5000); // Tunggu 5 detik sebelum coba lagi
+
+    delay(3000); // Ulang tiap 3 detik
   }
 }
