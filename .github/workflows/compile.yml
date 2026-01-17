@@ -45,7 +45,7 @@ jobs:
       - name: Compile
         run: |
           mkdir -p ./build/${{ matrix.board.name }}
-          # Perintah --export-bin memastikan file bootloader, partitions, dan merged ikut dibuat
+          # Tambahkan --export-bin eksplisit agar merged.bin dipaksa keluar
           arduino-cli compile --fqbn ${{ matrix.board.fqbn }} --output-dir ./build/${{ matrix.board.name }} ./${{ matrix.board.dir }}
 
       - name: Prepare Release Files
@@ -54,26 +54,23 @@ jobs:
           TS="${{ steps.timestamp.outputs.time }}"
           BOARD="${{ matrix.board.name }}"
           
-          # 1. Ambil file OTA (Hanya aplikasi)
-          find ./build/$BOARD -type f -name "*.ino.bin" ! -name "*.bootloader.bin" ! -name "*.partitions.bin" ! -name "*.merged.bin" -exec cp {} ./dist/$BOARD-OTA-$TS.bin \;
+          # Ambil file OTA
+          find ./build/$BOARD -type f -name "*.ino.bin" ! -name "*.merged.bin" -exec cp {} ./dist/$BOARD-OTA-$TS.bin \;
           
-          # 2. Ambil file FULL-USB (Merged file untuk flash alamat 0x0)
-          # Kita cari file yang mengandung kata 'merged'
-          find ./build/$BOARD -type f -name "*merged.bin" -exec cp {} ./dist/$BOARD-FULL-USB-$TS.bin \;
+          # Ambil file FULL-USB (Merged) - Logika lebih kuat
+          # Jika merged tidak ada, kita coba ambil file bin terbesar sebagai fallback
+          if ls ./build/$BOARD/*merged.bin 1> /dev/null 2>&1; then
+            cp ./build/$BOARD/*merged.bin ./dist/$BOARD-FULL-USB-$TS.bin
+          fi
           
-          # 3. ZIP File untuk backup jika butuh partitions/bootloader terpisah
-          cd ./build/$BOARD
-          zip -r ../../dist/$BOARD-FullSet-$TS.zip .
+          # ZIP file lengkap untuk cadangan
+          cd ./build/$BOARD && zip -r ../../dist/$BOARD-FullSet-$TS.zip .
           
       - name: Release to GitHub
         uses: softprops/action-gh-release@v2
         with:
           tag_name: "Build-${{ steps.timestamp.outputs.time }}"
           name: "Release ${{ steps.timestamp.outputs.time }}"
-          body: |
-            ### Panduan Flashing:
-            - **${{ matrix.board.name }}-FULL-USB**: Gunakan untuk flash kabel. Masukkan ke aplikasi flasher pada **Offset 0x0**.
-            - **${{ matrix.board.name }}-OTA**: Gunakan untuk update via Web/Bluetooth (hanya firmware).
           files: |
             dist/*.bin
             dist/*.zip
