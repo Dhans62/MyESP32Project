@@ -16,7 +16,7 @@ jobs:
     permissions:
       contents: write
     strategy:
-      fail-fast: false  # TAMBAHKAN INI: Agar C3 tetap lanjut walau Classic error
+      fail-fast: false
       matrix:
         board: [
           {name: "ESP32-Classic", fqbn: "esp32:esp32:esp32", core: "2.0.17", dir: "ESP32-Classic"},
@@ -45,23 +45,34 @@ jobs:
       - name: Compile
         run: |
           mkdir -p ./build/${{ matrix.board.name }}
-          # Kompilasi dari folder spesifik sesuai matrix
           arduino-cli compile --fqbn ${{ matrix.board.fqbn }} --output-dir ./build/${{ matrix.board.name }} ./${{ matrix.board.dir }}
 
       - name: Prepare Release Files
         run: |
           mkdir -p ./dist
           TS="${{ steps.timestamp.outputs.time }}"
-          # Ambil file OTA dan ZIP sesuai folder board
-          cp ./build/${{ matrix.board.name }}/*.ino.bin ./dist/${{ matrix.board.name }}-OTA-$TS.bin
-          cd ./build/${{ matrix.board.name }}
-          zip -r ../../dist/${{ matrix.board.name }}-FullFlash-$TS.zip .
+          BOARD="${{ matrix.board.name }}"
+          
+          # 1. Ambil file OTA (Hanya untuk update WiFi/BT)
+          find ./build/$BOARD -type f -name "*.ino.bin" ! -name "*.bootloader.bin" ! -name "*.partitions.bin" -exec cp {} ./dist/$BOARD-OTA-$TS.bin \;
+          
+          # 2. Ambil file FULL (Merged untuk Flash Kabel USB - Alamat 0x0)
+          # Perintah find ini mencari file .merged.bin untuk diletakkan di dist agar mudah diunduh
+          find ./build/$BOARD -type f -name "*.merged.bin" -exec cp {} ./dist/$BOARD-FULL-USB-$TS.bin \;
+          
+          # 3. Tetap sediakan ZIP jika Anda butuh file terpisah (bootloader/partitions)
+          cd ./build/$BOARD
+          zip -r ../../dist/$BOARD-Development-Files-$TS.zip .
           
       - name: Release to GitHub
         uses: softprops/action-gh-release@v2
         with:
           tag_name: "Build-${{ steps.timestamp.outputs.time }}"
           name: "Release ${{ steps.timestamp.outputs.time }}"
+          body: |
+            ### Panduan Flashing:
+            - **FILE FULL-USB**: Gunakan untuk flash via kabel. Masukkan ke aplikasi flasher pada **Offset 0x0**.
+            - **FILE OTA**: Gunakan hanya untuk update firmware via WiFi/Bluetooth.
           files: |
             dist/*.bin
             dist/*.zip
