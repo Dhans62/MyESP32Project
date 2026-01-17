@@ -85,13 +85,45 @@ void executeHandshake() {
 }
 
 void loop() {
-  // Cek input dari Serial Monitor
   if (Serial.available()) {
     char cmd = Serial.read();
-    if (cmd == 'G' || cmd == 'g') {
-      executeHandshake();
+    if (cmd == 'G') {
+      Serial.println("\n[!] SPAM MODE AKTIF. PUTAR KONTAK SEKARANG!");
+      
+      // Lakukan Spam sebanyak 20 kali dalam 5 detik
+      for(int i=0; i<20; i++) {
+        bike.end();
+        pinMode(TX_PIN, OUTPUT);
+        
+        // Physical Pulse
+        digitalWrite(TX_PIN, LOW);  delay(70);
+        digitalWrite(TX_PIN, HIGH); delay(130);
+        
+        bike.begin(10400, SERIAL_8N1, RX_PIN, TX_PIN);
+        delay(50);
+        
+        // Coba 2 Format sekaligus
+        byte engine11[] = {0x72, 0x05, 0x00, 0x11, 0x78};
+        byte iso81[] = {0x81, 0x11, 0xF1, 0x81, 0x04}; // Standard ISO
+        
+        bike.write(engine11, 5);
+        delay(20);
+        bike.write(iso81, 5);
+        
+        // Intip apakah ada balasan
+        unsigned long start = millis();
+        while(millis() - start < 100) {
+          if(bike.available()) {
+            byte r = bike.read();
+            // Jika r bukan bagian dari echo, berarti ini jawaban ECU!
+            if (r != 0x72 && r != 0x81 && r != 0x05 && r != 0x11) {
+              Serial.printf("\n[!!!] ECU BERSUARA: %02X ", r);
+            }
+          }
+        }
+        Serial.print("."); // Indikator spam
+      }
+      Serial.println("\n--- Spam Selesai ---");
     }
   }
 }
-
-
