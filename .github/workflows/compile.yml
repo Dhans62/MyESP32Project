@@ -2,12 +2,7 @@ name: Pro-Build Multi-Platform-Folders
 
 on:
   push:
-    branches:
-      - main
-    paths:
-      - 'run-build/**'
-      - 'ESP32-Classic/**'
-      - 'ESP32-C3/**'
+    branches: [main]
   workflow_dispatch:
 
 jobs:
@@ -19,8 +14,8 @@ jobs:
       fail-fast: false
       matrix:
         board: [
-          {name: "ESP32-Classic", fqbn: "esp32:esp32:esp32", core: "2.0.17", dir: "ESP32-Classic", chip: "esp32"},
-          {name: "ESP32-C3", fqbn: "esp32:esp32:esp32c3", core: "3.0.7", dir: "ESP32-C3", chip: "esp32c3"}
+          {name: "ESP32-Classic", fqbn: "esp32:esp32:esp32", core: "2.0.17", dir: "ESP32-Classic"},
+          {name: "ESP32-C3", fqbn: "esp32:esp32:esp32c3", core: "3.0.7", dir: "ESP32-C3"}
         ]
     steps:
       - name: Checkout Code
@@ -37,17 +32,25 @@ jobs:
           arduino-cli config init
           arduino-cli config add board_manager.additional_urls https://raw.githubusercontent.com/espressif/arduino-esp32/gh-pages/package_esp32_index.json
 
-      - name: Install Core & Tools
+      - name: Install Core & Auto-Libraries
         run: |
           arduino-cli core update-index
           arduino-cli core install esp32:esp32@${{ matrix.board.core }}
-          pip install esptool  # Dibutuhkan untuk manual merge ESP32 Classic
+          # Cek jika file libraries.txt ada, lalu instal isinya
+          if [ -f ./libraries/libraries.txt ]; then
+            while IFS= read -r line || [ -n "$line" ]; do
+              echo "Installing library: $line"
+              arduino-cli lib install "$line"
+            done < ./libraries/libraries.txt
+          fi
+          pip install esptool
 
       - name: Compile
         run: |
           mkdir -p ./build/${{ matrix.board.name }}
-          # FLAG: -DARDUINO_USB_CDC_ON_BOOT=1 agar Serial Monitor C3 aktif lewat USB internal
+          # --libraries ./libraries menyertakan folder manual
           arduino-cli compile --fqbn ${{ matrix.board.fqbn }} \
+            --libraries ./libraries \
             --build-property "build.extra_flags=-DARDUINO_USB_CDC_ON_BOOT=1" \
             --output-dir ./build/${{ matrix.board.name }} ./${{ matrix.board.dir }}
 
@@ -57,39 +60,22 @@ jobs:
           TS="${{ steps.timestamp.outputs.time }}"
           BOARD="${{ matrix.board.name }}"
           
-          # 1. Ambil file OTA (Hanya aplikasi)
+          # OTA Bin
           find ./build/$BOARD -type f -name "*.ino.bin" ! -name "*.merged.bin" ! -name "*.bootloader.bin" ! -name "*.partitions.bin" -exec cp {} ./dist/$BOARD-OTA-$TS.bin \;
           
-          # 2. Logika Pembuatan FULL-USB (Merged)
+          # FULL-USB (Manual Merge untuk Classic, Auto untuk C3)
           if [ "${{ matrix.board.core }}" == "2.0.17" ]; then
-            echo "Melakukan Manual Merge untuk ESP32 Classic..."
-            esptool.py --chip esp32 merge_bin \
-              -o ./dist/$BOARD-FULL-USB-$TS.bin \
-              --flash_mode dio --flash_size 4MB \
-              0x1000 ./build/$BOARD/*.bootloader.bin \
-              0x8000 ./build/$BOARD/*.partitions.bin \
-              0x10000 ./build/$BOARD/*.ino.bin
+            esptool.py --chip esp32 merge_bin -o ./dist/$BOARD-FULL-USB-$TS.bin --flash_mode dio --flash_size 4MB 0x1000 ./build/$BOARD/*.bootloader.bin 0x8000 ./build/$BOARD/*.partitions.bin 0x10000 ./build/$BOARD/*.ino.bin
           else
-            echo "Mengambil Merged Bin otomatis untuk C3..."
             find ./build/$BOARD -type f -name "*merged.bin" -exec cp {} ./dist/$BOARD-FULL-USB-$TS.bin \;
           fi
           
-          # 3. ZIP Semua file asli untuk cadangan
-          cd ./build/$BOARD && zip -r ../../dist/$BOARD-FullSet-$TS.zip .
-          
-      - name: Release to GitHub
+      - name: Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: "Build-${{ steps.timestamp.outputs.time }}"
           name: "Release ${{ steps.timestamp.outputs.time }}"
-          body: |
-            ### Panduan Flashing HP/PC:
-            1. Gunakan file **FULL-USB**.
-            2. Set Alamat/Offset ke **0x0**.
-            3. Jika C3 tidak muncul Log, pastikan driver USB JTAG/serial terpasang.
-          files: |
-            dist/*.bin
-            dist/*.zip
+          files: dist/*.bin
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           
