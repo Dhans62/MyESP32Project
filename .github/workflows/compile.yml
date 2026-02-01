@@ -36,22 +36,34 @@ jobs:
         run: |
           arduino-cli core update-index
           arduino-cli core install esp32:esp32@${{ matrix.board.core }}
-          # Cek jika file libraries.txt ada, lalu instal isinya
-          if [ -f ./libraries/libraries.txt ]; then
+          
+          # Hanya instal library jika file libraries.txt ADA dan TIDAK KOSONG
+          if [ -f ./libraries/libraries.txt ] && [ -s ./libraries/libraries.txt ]; then
             while IFS= read -r line || [ -n "$line" ]; do
+              # Abaikan baris kosong atau komentar
+              [[ -z "$line" || "$line" == "#"* ]] && continue
               echo "Installing library: $line"
               arduino-cli lib install "$line"
             done < ./libraries/libraries.txt
+          else
+            echo "No libraries.txt found or file is empty. Skipping auto-install."
           fi
           pip install esptool
 
       - name: Compile
         run: |
           mkdir -p ./build/${{ matrix.board.name }}
-          # --libraries ./libraries menyertakan folder manual
+          
+          # Tentukan folder library tambahan jika foldernya ada
+          LIB_PATH=""
+          if [ -d "./libraries" ]; then
+            LIB_PATH="--libraries ./libraries"
+          fi
+
+          # Tambahkan flag USB_MODE=1 untuk memperbaiki error 'USBSerial' di Core 3.x
           arduino-cli compile --fqbn ${{ matrix.board.fqbn }} \
-            --libraries ./libraries \
-            --build-property "build.extra_flags=-DARDUINO_USB_CDC_ON_BOOT=1" \
+            $LIB_PATH \
+            --build-property "build.extra_flags=-DARDUINO_USB_CDC_ON_BOOT=1 -DARDUINO_USB_MODE=1" \
             --output-dir ./build/${{ matrix.board.name }} ./${{ matrix.board.dir }}
 
       - name: Prepare Release Files
@@ -60,14 +72,19 @@ jobs:
           TS="${{ steps.timestamp.outputs.time }}"
           BOARD="${{ matrix.board.name }}"
           
-          # OTA Bin
+          # OTA Bin (Filter file agar tidak mengambil bootloader/partitions sebagai OTA)
           find ./build/$BOARD -type f -name "*.ino.bin" ! -name "*.merged.bin" ! -name "*.bootloader.bin" ! -name "*.partitions.bin" -exec cp {} ./dist/$BOARD-OTA-$TS.bin \;
           
-          # FULL-USB (Manual Merge untuk Classic, Auto untuk C3)
+          # FULL-USB (Manual Merge untuk Classic v2, Auto untuk C3 v3)
           if [ "${{ matrix.board.core }}" == "2.0.17" ]; then
             esptool.py --chip esp32 merge_bin -o ./dist/$BOARD-FULL-USB-$TS.bin --flash_mode dio --flash_size 4MB 0x1000 ./build/$BOARD/*.bootloader.bin 0x8000 ./build/$BOARD/*.partitions.bin 0x10000 ./build/$BOARD/*.ino.bin
           else
-            find ./build/$BOARD -type f -name "*merged.bin" -exec cp {} ./dist/$BOARD-FULL-USB-$TS.bin \;
+            # C3 Core 3.x biasanya menghasilkan merged.bin secara otomatis
+            if ls ./build/$BOARD/*merged.bin 1> /dev/null 2>&1; then
+              cp ./build/$BOARD/*merged.bin ./dist/$BOARD-FULL-USB-$TS.bin
+            else
+              echo "Warning: merged.bin not found, skip copy."
+            fi
           fi
           
       - name: Release
